@@ -1,0 +1,261 @@
+# ============================================================================
+# AdMiner — ambiente local completo.
+#
+#   docker compose up                      → app em modo demo (dados mockados)
+#   docker compose --profile supabase up   → stack Supabase + app sobre Postgres
+#
+# O `.env` define COMPOSE_PROFILES=demo, por isso o primeiro comando não
+# precisa de flag. Passar `--profile` substitui esse valor (não soma), então
+# os dois `web` abaixo nunca sobem juntos e não disputam a porta 3000.
+#
+# Redis não está aqui de propósito: `src/jobs/redis-queue.ts` é um esqueleto
+# que lança erro em toda operação e não há `bullmq`/`ioredis` instalados.
+# Subir Redis daria um app que quebra no primeiro job — por isso JOB_DRIVER
+# fica fixo em `memory`.
+# ============================================================================
+name: adminer
+
+# ------------------------------------------------------------------ âncoras --
+x-web-common: &web-common
+  build:
+    context: .
+    target: dev
+  # -H 0.0.0.0: sem isso o Next só aceitaria conexões de dentro do container.
+  command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3000"]
+  ports:
+    - "3000:3000"
+  volumes:
+    # Bind mount do código: editar em src/ recarrega na hora.
+    - .:/app
+    # Volumes nomeados por cima do bind mount, para que o node_modules de
+    # linux/arm64 da imagem não seja encoberto pelo de macOS do host.
+    - web_node_modules:/app/node_modules
+    - web_next_cache:/app/.next
+  environment: &web-env
+    NODE_ENV: development
+    NEXT_PUBLIC_APP_NAME: AdMiner
+    NEXT_PUBLIC_APP_URL: http://localhost:3000
+    ADS_PROVIDER: ${ADS_PROVIDER:-mock}
+    AI_PROVIDER: ${AI_PROVIDER:-heuristic}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    META_AD_LIBRARY_ACCESS_TOKEN: ${META_AD_LIBRARY_ACCESS_TOKEN:-}
+    ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+    JOB_DRIVER: memory
+    # O bind mount do macOS não propaga eventos de arquivo de forma confiável;
+    # o polling é o que mantém o hot reload funcionando.
+    WATCHPACK_POLLING: "true"
+    CHOKIDAR_USEPOLLING: "true"
+
+services:
+  # ------------------------------------------------------------- app (demo) --
+  web:
+    <<: *web-common
+    profiles: ["demo"]
+    container_name: adminer-web
+    environment:
+      <<: *web-env
+      # Sem chaves de Supabase, `isDemoMode()` é verdadeiro: repositórios em
+      # memória, dataset sintético, sessão por cookie. Não depende de nada.
+      DATA_DRIVER: memory
+
+  # --------------------------------------------------------- app (supabase) --
+  web-supabase:
+    <<: *web-common
+    profiles: ["supabase"]
+    container_name: adminer-web
+    environment:
+      <<: *web-env
+      DATA_DRIVER: supabase
+      # Hostname interno: quem fala com o Supabase é sempre o servidor
+      # (`src/lib/supabase/server.ts` e `src/proxy.ts`). O client de browser
+      # existe em `src/lib/supabase/client.ts` mas não é chamado por ninguém —
+      # se um dia for, esta URL precisa virar http://localhost:8000.
+      NEXT_PUBLIC_SUPABASE_URL: http://gateway:8000
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?defina ANON_KEY no .env}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY:?defina SERVICE_ROLE_KEY no .env}
+    depends_on:
+      gateway:
+        condition: service_started
+      migrate:
+        # Só sobe depois que as 10 migrations passaram.
+        condition: service_completed_successfully
+
+  # ------------------------------------------------------------------- banco --
+  db:
+    image: postgres:16-alpine
+    profiles: ["supabase"]
+    container_name: adminer-db
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Roda só na criação do volume: papéis, schemas e os helpers auth.*
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    ports:
+      # 54322 para não colidir com um Postgres já instalado na máquina.
+      - "54322:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # ------------------------------------------------------------------- auth --
+  auth:
+    image: supabase/gotrue:v2.177.0
+    profiles: ["supabase"]
+    container_name: adminer-auth
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: http://localhost:8000
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres?search_path=auth&sslmode=disable
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_URI_ALLOW_LIST: http://localhost:3000,http://localhost:3000/**
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env}
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      # Sem servidor de e-mail local: a conta já nasce confirmada, senão o
+      # cadastro pelo formulário nunca devolveria sessão.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_LOG_LEVEL: info
+
+  # ------------------------------------------------------------------- rest --
+  rest:
+    image: postgrest/postgrest:v12.2.12
+    profiles: ["supabase"]
+    container_name: adminer-rest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Conecta como `authenticator` e troca de papel conforme o JWT — é isso
+      # que faz a RLS de 0009 valer para o usuário certo.
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+
+  # ---------------------------------------------------------------- storage --
+  storage:
+    image: supabase/storage-api:v1.14.5
+    profiles: ["supabase"]
+    container_name: adminer-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    environment:
+      ANON_KEY: ${ANON_KEY:?}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY:?}
+      PGRST_JWT_SECRET: ${JWT_SECRET:?}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
+      POSTGREST_URL: http://rest:3000
+      FILE_SIZE_LIMIT: "52428800"
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+      TENANT_ID: adminer
+      REGION: local
+      GLOBAL_S3_BUCKET: adminer
+    volumes:
+      - storage_data:/var/lib/storage
+
+  # --------------------------------------------------------------- migrate --
+  migrate:
+    image: postgres:16-alpine
+    profiles: ["supabase"]
+    container_name: adminer-migrate
+    depends_on:
+      db:
+        condition: service_healthy
+      # As migrations dependem de auth.users e storage.objects, criadas pelo
+      # GoTrue e pelo Storage. O script espera as duas antes de aplicar.
+      auth:
+        condition: service_started
+      storage:
+        condition: service_started
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./docker/migrate.sh:/migrate.sh:ro
+      - ./docker/postgres/auth-helpers.sql:/auth-helpers.sql:ro
+    entrypoint: ["/bin/sh", "/migrate.sh"]
+    restart: "no"
+
+  # --------------------------------------------------------------- gateway --
+  gateway:
+    image: nginx:1.27-alpine
+    profiles: ["supabase"]
+    container_name: adminer-gateway
+    depends_on:
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+      storage:
+        condition: service_started
+    volumes:
+      - ./docker/gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8000:8000"
+
+  # ------------------------------------------------------- studio (opcional) --
+  meta:
+    image: supabase/postgres-meta:v0.84.2
+    profiles: ["supabase"]
+    container_name: adminer-meta
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: "5432"
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+
+  studio:
+    image: supabase/studio:latest
+    profiles: ["supabase"]
+    container_name: adminer-studio
+    depends_on:
+      meta:
+        condition: service_started
+    ports:
+      - "54323:3000"
+    # A imagem traz um healthcheck que consulta /api/platform/profile, rota que
+    # só existe na versão de plataforma da Supabase. Em self-hosted ela nunca
+    # responde 200 e o container aparece como "unhealthy" mesmo funcionando.
+    # Nada depende da saúde do Studio, então o teste sai de cena.
+    healthcheck:
+      disable: true
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DEFAULT_ORGANIZATION_NAME: AdMiner
+      DEFAULT_PROJECT_NAME: AdMiner
+      SUPABASE_URL: http://gateway:8000
+      SUPABASE_PUBLIC_URL: http://localhost:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY:?}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:?}
+      AUTH_JWT_SECRET: ${JWT_SECRET:?}
+
+volumes:
+  db_data:
+  storage_data:
+  web_node_modules:
+  web_next_cache:

@@ -1,0 +1,17 @@
+# node_modules nunca entra: é reinstalado dentro da imagem para linux/arm64.
+# As cópias de macOS têm binários nativos incompatíveis.
+node_modules
+.next
+.git
+.gitignore
+*.tsbuildinfo
+coverage
+.DS_Store
+npm-debug.log*
+# Segredos ficam de fora da imagem — chegam por `environment` no compose.
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+compose.yaml
