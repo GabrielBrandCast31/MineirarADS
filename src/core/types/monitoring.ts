@@ -16,6 +16,35 @@ export const MONITOR_FREQUENCY_LABEL: Record<MonitorFrequency, string> = {
   weekly: "Semanal",
 };
 
+/** Intervalo entre coletas, em horas. */
+export const MONITOR_FREQUENCY_HOURS: Record<MonitorFrequency, number> = {
+  hourly: 1,
+  daily: 24,
+  weekly: 168,
+};
+
+/**
+ * Quando a próxima coleta fica elegível.
+ *
+ * Vive no core porque os dois drivers de dados agendam a mesma coisa: se cada
+ * um calculasse o intervalo por conta, "semanal" acabaria valendo uma coisa em
+ * memória e outra no Postgres.
+ */
+export function nextCheckAtFor(
+  frequency: MonitorFrequency,
+  from: Date | string = new Date(),
+): string {
+  const base = typeof from === "string" ? new Date(from) : from;
+  return new Date(base.getTime() + MONITOR_FREQUENCY_HOURS[frequency] * 3_600_000).toISOString();
+}
+
+/** Um monitoramento está vencido quando está ativo e passou da hora. */
+export function isMonitorDue(monitor: Monitor, now: Date = new Date()): boolean {
+  if (!monitor.active) return false;
+  if (!monitor.nextCheckAt) return true;
+  return new Date(monitor.nextCheckAt).getTime() <= now.getTime();
+}
+
 export interface Monitor {
   id: string;
   workspaceId: string;

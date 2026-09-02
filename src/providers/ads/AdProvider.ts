@@ -59,14 +59,15 @@ export interface AdProvider {
 
 /** Erro esperado quando a integração existe mas não está implementada. */
 export class ProviderNotImplementedError extends Error {
-  constructor(
-    public readonly provider: string,
-    public readonly operation: string,
-    hint?: string,
-  ) {
+  readonly provider: string;
+  readonly operation: string;
+
+  constructor(provider: string, operation: string, hint?: string) {
     super(
       `[${provider}] Operação "${operation}" ainda não implementada.${hint ? ` ${hint}` : ""}`,
     );
+    this.provider = provider;
+    this.operation = operation;
     this.name = "ProviderNotImplementedError";
   }
 }

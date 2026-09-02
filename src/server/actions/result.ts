@@ -1,3 +1,4 @@
+import { InvalidAdLibraryLinkError } from "@/core/meta/ad-library-link";
 import { ForbiddenError, NotFoundError } from "@/data/types";
 import { FeatureLockedError, QuotaExceededError } from "@/server/services/quota";
 import { AICapabilityError, AIProviderError } from "@/providers/ai";
@@ -16,6 +17,7 @@ export type ActionResult<T = undefined> =
 
 export type ActionErrorCode =
   | "quota"
+  | "invalid_link"
   | "feature_locked"
   | "forbidden"
   | "not_found"
@@ -25,6 +27,11 @@ export type ActionErrorCode =
 export const success = <T>(data: T): ActionResult<T> => ({ ok: true, data });
 
 export function failure(error: unknown): ActionResult<never> {
+  // Link inválido é erro de entrada, não falha: a mensagem já explica o que
+  // fazer e vai direto para o formulário, sem poluir o log de erros.
+  if (error instanceof InvalidAdLibraryLinkError) {
+    return { ok: false, error: error.message, code: "invalid_link" };
+  }
   if (error instanceof QuotaExceededError) {
     return { ok: false, error: error.message, code: "quota" };
   }

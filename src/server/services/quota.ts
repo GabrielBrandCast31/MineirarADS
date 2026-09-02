@@ -3,25 +3,31 @@ import { PLANS, limitFor, planHasFeature } from "@/core/constants/plans";
 import { getRepositories } from "@/data";
 
 export class QuotaExceededError extends Error {
-  constructor(
-    public readonly metric: UsageMetric,
-    public readonly used: number,
-    public readonly limit: number,
-    public readonly planName: string,
-  ) {
+  readonly metric: UsageMetric;
+  readonly used: number;
+  readonly limit: number;
+  readonly planName: string;
+
+  constructor(metric: UsageMetric, used: number, limit: number, planName: string) {
     super(
       `Limite do plano ${planName} atingido: ${used}/${limit}. Faça upgrade para continuar.`,
     );
+    this.metric = metric;
+    this.used = used;
+    this.limit = limit;
+    this.planName = planName;
     this.name = "QuotaExceededError";
   }
 }
 
 export class FeatureLockedError extends Error {
-  constructor(
-    public readonly feature: PlanFeature,
-    public readonly planName: string,
-  ) {
+  readonly feature: PlanFeature;
+  readonly planName: string;
+
+  constructor(feature: PlanFeature, planName: string) {
     super(`Este recurso não está disponível no plano ${planName}.`);
+    this.feature = feature;
+    this.planName = planName;
     this.name = "FeatureLockedError";
   }
 }

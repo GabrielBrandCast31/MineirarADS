@@ -5,12 +5,8 @@ import Link from "next/link";
 import { ArrowRight, Loader2, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import {
-  EMPTY_AUTH_STATE,
-  signInAction,
-  signUpAction,
-  type AuthState,
-} from "@/app/(auth)/actions";
+import { signInAction, signUpAction } from "@/app/(auth)/actions";
+import { EMPTY_AUTH_STATE, type AuthState } from "@/app/(auth)/auth-state";
 
 export function AuthForm({
   mode,

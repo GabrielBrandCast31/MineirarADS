@@ -25,6 +25,12 @@ function firstExisting(basePath) {
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    // `next/headers` e afins não trazem mapa de exports; sem isto, qualquer
+    // teste que alcance a camada de dados morre na resolução do Next.
+    if (specifier.startsWith("next/")) {
+      const resolved = firstExisting(path.join(projectRoot, "node_modules", specifier));
+      if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+    }
     if (specifier.startsWith("@/")) {
       const resolved = firstExisting(path.join(srcRoot, specifier.slice(2)));
       if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };

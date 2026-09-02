@@ -35,12 +35,15 @@ export function buildJobHandlers(
     },
 
     "monitor.sweep": async () => {
-      // Sem acesso multi-workspace no driver de memória, o sweep é operado
-      // pela rota /api/jobs/run, que já roda no contexto do workspace.
+      // A varredura é por workspace (é o escopo de toda leitura de dados), e a
+      // fila não carrega sessão. Quem varre é `sweepDueMonitors`, chamado pela
+      // página de monitoramento e por `POST /api/jobs/run` — ambos já dentro de
+      // um workspace. Este handler permanece como ponto de entrada para quando
+      // houver um resolvedor multi-workspace no driver Redis.
       await log({
         level: "debug",
         scope: "job",
-        message: "monitor.sweep executado",
+        message: "monitor.sweep é operado por POST /api/jobs/run",
       });
     },
 

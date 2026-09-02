@@ -3,12 +3,27 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { Monitor } from "@/core/types/monitoring";
+import { InvalidAdLibraryLinkError } from "@/core/meta/ad-library-link";
 import { getRepositories } from "@/data";
 import { requireSession } from "@/server/auth";
-import { runMonitorCheck, startMonitoring, stopMonitoring } from "@/server/services/monitoring";
+import {
+  runMonitorCheck,
+  startMonitoring,
+  stopMonitoring,
+  sweepDueMonitors,
+  watchAdLibraryLink,
+  type SweepOutcome,
+  type WatchAdLibraryLinkOutcome,
+} from "@/server/services/monitoring";
 import { failure, success, type ActionResult } from "./result";
 
 const targetSchema = z.enum(["ad", "offer", "advertiser"]);
+const frequencySchema = z.enum(["hourly", "daily", "weekly"]);
+
+const watchLinkSchema = z.object({
+  url: z.string().trim().min(1, "Cole o link da Biblioteca de Anúncios.").max(2048),
+  frequency: frequencySchema.default("daily"),
+});
 
 export async function startMonitoringAction(input: {
   target: z.infer<typeof targetSchema>;
@@ -27,6 +42,52 @@ export async function startMonitoringAction(input: {
     revalidatePath("/monitoring");
     revalidatePath("/dashboard");
     return success(monitor);
+  } catch (error) {
+    return failure(error);
+  }
+}
+
+/**
+ * Salva o link de uma página da Biblioteca de Anúncios e começa a acompanhar.
+ *
+ * Recebe a URL crua, do jeito que o usuário copiou do navegador — interpretar
+ * o link é responsabilidade do serviço, não do formulário.
+ */
+export async function watchAdLibraryLinkAction(input: {
+  url: string;
+  frequency?: "hourly" | "daily" | "weekly";
+}): Promise<ActionResult<WatchAdLibraryLinkOutcome>> {
+  try {
+    const session = await requireSession();
+    const parsed = watchLinkSchema.safeParse(input);
+    if (!parsed.success) {
+      // Mensagem de campo, não erro interno: vai direto para o formulário.
+      throw new InvalidAdLibraryLinkError(
+        parsed.error.issues[0]?.message ?? "Link inválido.",
+      );
+    }
+    const outcome = await watchAdLibraryLink(session, parsed.data);
+
+    revalidatePath("/monitoring");
+    revalidatePath("/advertisers");
+    revalidatePath("/dashboard");
+    return success(outcome);
+  } catch (error) {
+    return failure(error);
+  }
+}
+
+/** Verifica de uma vez tudo o que venceu — usada pela página de monitoramento. */
+export async function sweepDueMonitorsAction(): Promise<ActionResult<SweepOutcome>> {
+  try {
+    const session = await requireSession();
+    const outcome = await sweepDueMonitors(session, { limit: 10 });
+
+    if (outcome.checked > 0) {
+      revalidatePath("/monitoring");
+      revalidatePath("/dashboard");
+    }
+    return success(outcome);
   } catch (error) {
     return failure(error);
   }

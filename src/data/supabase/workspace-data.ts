@@ -18,6 +18,7 @@ import type {
   MonitoringSnapshot,
   Notification,
 } from "@/core/types/monitoring";
+import { nextCheckAtFor } from "@/core/types/monitoring";
 import type { SearchRecord } from "@/core/types/search";
 import type {
   AppUser,
@@ -317,6 +318,24 @@ export class SupabaseMonitoringRepository implements MonitoringRepository {
     );
   }
 
+  /** Usa o índice parcial `monitors_due_idx` (ativos, ordenados por vencimento). */
+  async listDueMonitors(
+    ctx: SessionContext,
+    options: { limit?: number; now?: string } = {},
+  ): Promise<Monitor[]> {
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("monitors")
+      .select("*")
+      .eq("workspace_id", ctx.workspace.id)
+      .eq("active", true)
+      .lte("next_check_at", options.now ?? new Date().toISOString())
+      .order("next_check_at", { ascending: true })
+      .limit(options.limit ?? 25);
+    fail("Falha ao listar monitoramentos vencidos", error);
+    return (data ?? []).map((row: Row) => toMonitor(row));
+  }
+
   async getMonitor(ctx: SessionContext, id: string): Promise<Monitor | null> {
     const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase
@@ -450,15 +469,14 @@ export class SupabaseMonitoringRepository implements MonitoringRepository {
       .single();
     fail("Falha ao gravar snapshot", error);
 
-    const nextHours =
-      (await this.getMonitor(ctx, snapshot.monitorId))?.frequency === "hourly" ? 1 : 24;
+    // O intervalo sai do core: "semanal" precisa valer 7 dias aqui e no driver
+    // em memória, senão a mesma escolha do usuário significaria coisas diferentes.
+    const frequency = (await this.getMonitor(ctx, snapshot.monitorId))?.frequency ?? "daily";
     await supabase
       .from("monitors")
       .update({
         last_checked_at: snapshot.capturedAt,
-        next_check_at: new Date(
-          new Date(snapshot.capturedAt).getTime() + nextHours * 3_600_000,
-        ).toISOString(),
+        next_check_at: nextCheckAtFor(frequency, snapshot.capturedAt),
       })
       .eq("id", snapshot.monitorId);
 

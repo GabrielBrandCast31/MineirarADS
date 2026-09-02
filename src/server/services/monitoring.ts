@@ -1,23 +1,39 @@
-import type { AdEnriched } from "@/core/types/ad";
-import type { MonitorTarget, MonitoringEvent, Monitor } from "@/core/types/monitoring";
+import type { Ad, AdEnriched } from "@/core/types/ad";
+import type { Advertiser } from "@/core/types/advertiser";
+import { EMPTY_ADVERTISER_STATS } from "@/core/types/advertiser";
+import type { CountryCode } from "@/core/types/common";
+import type {
+  MonitorFrequency,
+  MonitorTarget,
+  MonitoringEvent,
+  Monitor,
+} from "@/core/types/monitoring";
 import type { SessionContext } from "@/core/types/workspace";
+import { InvalidAdLibraryLinkError, parseAdLibraryLink } from "@/core/meta/ad-library-link";
+import { avatarDataUrl } from "@/lib/avatar";
 import { getRepositories } from "@/data";
+import { getAdProvider } from "@/providers/ads";
 import { assertFeature, assertQuota } from "./quota";
-import { log } from "./logging";
+import { errorContext, log } from "./logging";
 
 export interface MonitorSubject {
   target: MonitorTarget;
   entityId: string;
   label: string;
   thumbnail?: string | null;
+  frequency?: MonitorFrequency;
 }
 
 /** Cria (ou reaproveita) um monitoramento e captura o primeiro snapshot. */
 export async function startMonitoring(
   ctx: SessionContext,
   subject: MonitorSubject,
+  options: { refresh?: boolean } = {},
 ): Promise<Monitor> {
   assertFeature(ctx, "monitoring");
+  // Hora a hora é o único intervalo que pesa na fonte; por isso é de plano.
+  if (subject.frequency === "hourly") assertFeature(ctx, "advanced_monitoring");
+
   const repositories = getRepositories();
 
   const existing = await repositories.monitoring.findMonitor(
@@ -34,16 +50,17 @@ export async function startMonitoring(
     entityId: subject.entityId,
     entityLabel: subject.label,
     entityThumbnail: subject.thumbnail ?? null,
+    frequency: subject.frequency ?? "daily",
   });
 
   await repositories.usage.increment(ctx, "monitors");
-  await runMonitorCheck(ctx, monitor);
+  await runMonitorCheck(ctx, monitor, options);
   await log(
     {
       level: "info",
       scope: "monitoring",
       message: `Monitoramento criado para ${subject.target} ${subject.label}`,
-      context: { monitorId: monitor.id },
+      context: { monitorId: monitor.id, frequency: monitor.frequency },
     },
     ctx,
   );
@@ -54,6 +71,98 @@ export async function startMonitoring(
 export async function stopMonitoring(ctx: SessionContext, monitorId: string): Promise<void> {
   await getRepositories().monitoring.deleteMonitor(ctx, monitorId);
 }
+
+/* ------------------------------------------- salvar o link de uma página -- */
+
+export interface WatchAdLibraryLinkInput {
+  /** URL colada da Biblioteca de Anúncios (ou o `page_id` cru). */
+  url: string;
+  frequency?: MonitorFrequency;
+}
+
+export interface WatchAdLibraryLinkOutcome {
+  monitor: Monitor;
+  advertiser: Advertiser;
+  /** Anúncios que a fonte devolveu para a página nesta primeira coleta. */
+  collected: number;
+  /** A página já estava sendo acompanhada; nada foi criado. */
+  alreadyWatching: boolean;
+  /** Limites honestos da coleta, para exibir junto do resultado. */
+  warnings: string[];
+}
+
+/**
+ * Passa a acompanhar a página de um link da Biblioteca de Anúncios.
+ *
+ * O link é a única coisa que o usuário tem em mãos, então ele é o ponto de
+ * entrada: daqui sai o `page_id`, dele sai (ou nasce) o anunciante no catálogo
+ * e sobre o anunciante fica o monitoramento. As coletas seguintes reusam o
+ * mesmo caminho — ver `runMonitorCheck`.
+ */
+export async function watchAdLibraryLink(
+  ctx: SessionContext,
+  input: WatchAdLibraryLinkInput,
+): Promise<WatchAdLibraryLinkOutcome> {
+  assertFeature(ctx, "monitoring");
+
+  const parsed = parseAdLibraryLink(input.url);
+  if (!parsed.ok) throw new InvalidAdLibraryLinkError(parsed.message);
+  if (parsed.link.kind === "ad") {
+    throw new InvalidAdLibraryLinkError(
+      "Esse link aponta para um anúncio específico, não para a página do anunciante. " +
+        "Abra “Ver todos os anúncios desta página” na Biblioteca e cole a URL com “view_all_page_id” — " +
+        "ou monitore o anúncio pelo ícone de radar dentro dele.",
+    );
+  }
+
+  const { pageId, country } = parsed.link;
+  const repositories = getRepositories();
+  const warnings: string[] = [];
+
+  const known = await repositories.monitoring.listMonitors(ctx);
+  const previous = await repositories.catalog.findAdvertiserByMetaPageId(ctx, pageId);
+  const alreadyWatching = Boolean(
+    previous && known.some((m) => m.target === "advertiser" && m.entityId === previous.id),
+  );
+
+  // Coleta imediata: sem ela o primeiro snapshot seria de um catálogo vazio e a
+  // primeira semana de monitoramento não teria base de comparação.
+  const collected = await collectPage(ctx, pageId, country);
+  warnings.push(...collected.warnings);
+
+  const advertiser =
+    previous ??
+    (await repositories.catalog.findAdvertiserByMetaPageId(ctx, pageId)) ??
+    (await advertiserOfFirstAd(ctx, collected.ads)) ??
+    (await createAdvertiserPlaceholder(ctx, pageId, country));
+
+  if (collected.ads.length === 0 && !previous) {
+    warnings.push(
+      getAdProvider().name === "mock"
+        ? "Nenhum anúncio coletado: a fonte ativa é o dataset de demonstração, que não conhece essa página. " +
+          "Configure ADS_PROVIDER=meta com um token da Ad Library para coletar a página real."
+        : "A fonte não devolveu anúncios para essa página agora — ela pode não ter anúncios no país do link. " +
+          "O monitoramento fica ativo e a próxima coleta tenta de novo.",
+    );
+  }
+
+  const monitor = await startMonitoring(
+    ctx,
+    {
+      target: "advertiser",
+      entityId: advertiser.id,
+      label: advertiser.name,
+      thumbnail: advertiser.avatarUrl,
+      frequency: input.frequency ?? "daily",
+    },
+    // A coleta acabou de acontecer; repetir agora só gastaria a fonte.
+    { refresh: false },
+  );
+
+  return { monitor, advertiser, collected: collected.ads.length, alreadyWatching, warnings };
+}
+
+/* ------------------------------------------------------------- verificação -- */
 
 /**
  * Executa uma verificação: coleta o estado atual, compara com o último
@@ -66,8 +175,14 @@ export async function stopMonitoring(ctx: SessionContext, monitorId: string): Pr
 export async function runMonitorCheck(
   ctx: SessionContext,
   monitor: Monitor,
+  options: { refresh?: boolean } = {},
 ): Promise<{ events: MonitoringEvent[]; adCount: number }> {
   const repositories = getRepositories();
+
+  // Sem reconsultar a fonte, a comparação seria entre duas leituras do mesmo
+  // catálogo — e nenhum anúncio novo apareceria nunca.
+  if (options.refresh !== false) await refreshFromSource(ctx, monitor);
+
   const ads = await collectAds(ctx, monitor);
 
   const activeAds = ads.filter((ad) => ad.status === "active");
@@ -136,6 +251,129 @@ export async function runMonitorCheck(
   return { events, adCount: ads.length };
 }
 
+export interface SweepOutcome {
+  /** Monitoramentos vencidos encontrados. */
+  due: number;
+  /** Quantos foram verificados sem erro. */
+  checked: number;
+  /** Eventos emitidos na varredura. */
+  events: number;
+}
+
+/**
+ * Verifica todos os monitoramentos vencidos do workspace.
+ *
+ * É o que faz "acompanhar durante a semana" acontecer sem ninguém clicando:
+ * cada monitoramento tem `nextCheckAt` conforme sua frequência, e esta função
+ * é o consumidor dessa fila. Roda a partir da própria interface (ao abrir
+ * Monitoramento) e de `POST /api/jobs/run`, para quem preferir um cron.
+ */
+export async function sweepDueMonitors(
+  ctx: SessionContext,
+  options: { limit?: number } = {},
+): Promise<SweepOutcome> {
+  const due = await getRepositories().monitoring.listDueMonitors(ctx, {
+    limit: options.limit ?? 10,
+  });
+
+  let checked = 0;
+  let events = 0;
+
+  // Em série de propósito: a fonte é externa e compartilhada entre alvos.
+  for (const monitor of due) {
+    try {
+      const result = await runMonitorCheck(ctx, monitor);
+      events += result.events.length;
+      checked += 1;
+    } catch (error) {
+      await log(
+        {
+          level: "warn",
+          scope: "monitoring",
+          message: `Falha ao verificar ${monitor.entityLabel}`,
+          context: { monitorId: monitor.id, ...errorContext(error) },
+        },
+        ctx,
+      );
+    }
+  }
+
+  if (due.length > 0) {
+    await log(
+      {
+        level: "info",
+        scope: "monitoring",
+        message: `Varredura: ${checked}/${due.length} verificado(s), ${events} evento(s)`,
+      },
+      ctx,
+    );
+  }
+
+  return { due: due.length, checked, events };
+}
+
+/* ------------------------------------------------------------- coleta ----- */
+
+/**
+ * Reconsulta a fonte para o alvo monitorado.
+ *
+ * Só páginas têm de onde recoletar: oferta e anúncio são recortes do que já
+ * está no catálogo, e ambos são atualizados quando a página deles é coletada.
+ *
+ * Não consome a cota de buscas — quem pediu isso foi o agendamento, não o
+ * usuário.
+ */
+async function refreshFromSource(ctx: SessionContext, monitor: Monitor): Promise<void> {
+  if (monitor.target !== "advertiser") return;
+
+  const advertiser = await getRepositories().catalog.getAdvertiser(ctx, monitor.entityId);
+  if (!advertiser?.metaPageId) return;
+
+  await collectPage(ctx, advertiser.metaPageId, advertiser.country);
+}
+
+/**
+ * Coleta os anúncios de uma página na fonte ativa e grava no catálogo.
+ *
+ * Nunca lança: uma fonte fora do ar não pode derrubar a verificação, senão o
+ * histórico ganharia buracos justamente quando mais importa.
+ */
+async function collectPage(
+  ctx: SessionContext,
+  pageId: string,
+  country: CountryCode | null,
+): Promise<{ ads: Ad[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  try {
+    const result = await getAdProvider().searchAds({
+      advertiser: pageId,
+      status: "all",
+      limit: 96,
+      ...(country ? { countries: [country] } : {}),
+    });
+    warnings.push(...result.warnings);
+
+    if (result.items.length > 0) {
+      await getRepositories().catalog.upsertBatch(ctx, { ads: result.items });
+    }
+    return { ads: result.items, warnings };
+  } catch (error) {
+    await log(
+      {
+        level: "warn",
+        scope: "monitoring",
+        message: `Falha ao coletar a página ${pageId} na fonte`,
+        context: { pageId, ...errorContext(error) },
+      },
+      ctx,
+    );
+    warnings.push(
+      "A fonte de anúncios não respondeu nesta coleta. O monitoramento segue ativo e tenta de novo na próxima.",
+    );
+    return { ads: [], warnings };
+  }
+}
+
 async function collectAds(ctx: SessionContext, monitor: Monitor): Promise<AdEnriched[]> {
   const repositories = getRepositories();
   switch (monitor.target) {
@@ -148,6 +386,57 @@ async function collectAds(ctx: SessionContext, monitor: Monitor): Promise<AdEnri
       return ad ? [ad] : [];
     }
   }
+}
+
+async function advertiserOfFirstAd(
+  ctx: SessionContext,
+  ads: Ad[],
+): Promise<Advertiser | null> {
+  const advertiserId = ads[0]?.advertiserId;
+  if (!advertiserId) return null;
+  return getRepositories().catalog.getAdvertiser(ctx, advertiserId);
+}
+
+/**
+ * Cria o anunciante a partir do próprio link, quando a fonte não devolveu nada.
+ *
+ * O usuário salvou um link válido; recusar por falta de dados perderia a
+ * intenção dele. O registro entra com o que o link realmente informa — id da
+ * página e país — e o nome verdadeiro chega na primeira coleta que trouxer
+ * anúncios. Nenhum número é inventado: as estatísticas ficam zeradas.
+ */
+async function createAdvertiserPlaceholder(
+  ctx: SessionContext,
+  pageId: string,
+  country: CountryCode | null,
+): Promise<Advertiser> {
+  const repositories = getRepositories();
+  const name = `Página ${pageId}`;
+  const now = new Date().toISOString();
+
+  await repositories.catalog.upsertBatch(ctx, {
+    advertisers: [
+      {
+        id: `page_${pageId}`,
+        metaPageId: pageId,
+        name,
+        avatarUrl: avatarDataUrl(name),
+        category: null,
+        country,
+        verified: false,
+        websiteUrl: null,
+        stats: EMPTY_ADVERTISER_STATS,
+        firstSeenAt: now,
+        lastSeenAt: now,
+      },
+    ],
+  });
+
+  const created = await repositories.catalog.findAdvertiserByMetaPageId(ctx, pageId);
+  if (!created) {
+    throw new Error(`Não foi possível registrar a página ${pageId} no catálogo.`);
+  }
+  return created;
 }
 
 /** Hash estável e barato — só precisa detectar mudança, não resistir a colisão. */

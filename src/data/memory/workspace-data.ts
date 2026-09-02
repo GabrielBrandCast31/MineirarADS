@@ -18,6 +18,7 @@ import type {
   MonitoringSnapshot,
   Notification,
 } from "@/core/types/monitoring";
+import { isMonitorDue, nextCheckAtFor } from "@/core/types/monitoring";
 import type { SearchRecord } from "@/core/types/search";
 import type {
   AppUser,
@@ -281,6 +282,18 @@ export class MemoryMonitoringRepository implements MonitoringRepository {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
+  async listDueMonitors(
+    ctx: SessionContext,
+    options: { limit?: number; now?: string } = {},
+  ): Promise<Monitor[]> {
+    const now = options.now ? new Date(options.now) : new Date();
+    const monitors = await this.listMonitors(ctx);
+    return monitors
+      .filter((monitor) => isMonitorDue(monitor, now))
+      .sort((a, b) => new Date(a.nextCheckAt ?? 0).getTime() - new Date(b.nextCheckAt ?? 0).getTime())
+      .slice(0, options.limit ?? 25);
+  }
+
   async getMonitor(ctx: SessionContext, id: string): Promise<Monitor | null> {
     return (
       store().monitors.find((m) => m.id === id && m.workspaceId === ctx.workspace.id) ?? null
@@ -315,6 +328,7 @@ export class MemoryMonitoringRepository implements MonitoringRepository {
     if (existing) return existing;
 
     const now = new Date();
+    const frequency = input.frequency ?? "daily";
     const monitor: Monitor = {
       id: nextId("mon"),
       workspaceId: ctx.workspace.id,
@@ -322,10 +336,10 @@ export class MemoryMonitoringRepository implements MonitoringRepository {
       entityId: input.entityId,
       entityLabel: input.entityLabel,
       entityThumbnail: input.entityThumbnail ?? null,
-      frequency: input.frequency ?? "daily",
+      frequency,
       active: true,
       lastCheckedAt: null,
-      nextCheckAt: new Date(now.getTime() + 3_600_000).toISOString(),
+      nextCheckAt: nextCheckAtFor(frequency, now),
       unseenEvents: 0,
       createdBy: ctx.user.id,
       createdAt: now.toISOString(),
@@ -380,7 +394,7 @@ export class MemoryMonitoringRepository implements MonitoringRepository {
     const monitor = await this.getMonitor(ctx, snapshot.monitorId);
     if (monitor) {
       monitor.lastCheckedAt = snapshot.capturedAt;
-      monitor.nextCheckAt = nextCheckFor(monitor, new Date(snapshot.capturedAt));
+      monitor.nextCheckAt = nextCheckAtFor(monitor.frequency, snapshot.capturedAt);
     }
     return full;
   }
@@ -453,11 +467,6 @@ export class MemoryMonitoringRepository implements MonitoringRepository {
     );
     if (found) found.read = true;
   }
-}
-
-function nextCheckFor(monitor: Monitor, from: Date): string {
-  const hours = monitor.frequency === "hourly" ? 1 : monitor.frequency === "daily" ? 24 : 168;
-  return new Date(from.getTime() + hours * 3_600_000).toISOString();
 }
 
 /* ============================================================== análises == */

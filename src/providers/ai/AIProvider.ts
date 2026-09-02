@@ -105,8 +105,11 @@ export class AICapabilityError extends Error {
 }
 
 export class AIProviderError extends Error {
-  constructor(provider: string, message: string, public override readonly cause?: unknown) {
+  override readonly cause?: unknown;
+
+  constructor(provider: string, message: string, cause?: unknown) {
     super(`[${provider}] ${message}`);
+    this.cause = cause;
     this.name = "AIProviderError";
   }
 }

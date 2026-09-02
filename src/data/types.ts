@@ -47,6 +47,16 @@ export interface CatalogRepository {
   getAdsByIds(ctx: SessionContext, ids: string[]): Promise<AdEnriched[]>;
 
   getAdvertiser(ctx: SessionContext, id: string): Promise<Advertiser | null>;
+  /**
+   * Busca pela chave natural da Meta (`page_id`).
+   *
+   * É o que permite partir de um link colado da Biblioteca de Anúncios: o link
+   * traz o `page_id`, não o nosso identificador interno.
+   */
+  findAdvertiserByMetaPageId(
+    ctx: SessionContext,
+    metaPageId: string,
+  ): Promise<Advertiser | null>;
   listAdvertisers(
     ctx: SessionContext,
     options?: { limit?: number; query?: string },
@@ -111,6 +121,11 @@ export interface LibraryRepository {
 
 export interface MonitoringRepository {
   listMonitors(ctx: SessionContext): Promise<Monitor[]>;
+  /** Ativos cuja próxima coleta já venceu — a fila de trabalho da varredura. */
+  listDueMonitors(
+    ctx: SessionContext,
+    options?: { limit?: number; now?: string },
+  ): Promise<Monitor[]>;
   getMonitor(ctx: SessionContext, id: string): Promise<Monitor | null>;
   findMonitor(
     ctx: SessionContext,
@@ -245,8 +260,11 @@ export interface Repositories {
 }
 
 export class RepositoryError extends Error {
-  constructor(message: string, public override readonly cause?: unknown) {
+  override readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
     super(message);
+    this.cause = cause;
     this.name = "RepositoryError";
   }
 }

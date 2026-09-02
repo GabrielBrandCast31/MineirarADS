@@ -152,6 +152,20 @@ export class SupabaseCatalogRepository implements CatalogRepository {
     return data ? toAdvertiser(data as Row) : null;
   }
 
+  async findAdvertiserByMetaPageId(
+    _ctx: SessionContext,
+    metaPageId: string,
+  ): Promise<Advertiser | null> {
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("advertisers")
+      .select("*")
+      .eq("meta_page_id", metaPageId.trim())
+      .maybeSingle();
+    if (error) throw new RepositoryError(`Falha ao buscar anunciante: ${error.message}`, error);
+    return data ? toAdvertiser(data as Row) : null;
+  }
+
   async listAdvertisers(
     _ctx: SessionContext,
     options: { limit?: number; query?: string } = {},

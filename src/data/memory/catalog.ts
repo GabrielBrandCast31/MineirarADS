@@ -98,6 +98,14 @@ export class MemoryCatalogRepository implements CatalogRepository {
     return this.store.dataset.index.advertiserById.get(id) ?? null;
   }
 
+  async findAdvertiserByMetaPageId(
+    _ctx: SessionContext,
+    metaPageId: string,
+  ): Promise<Advertiser | null> {
+    const wanted = metaPageId.trim();
+    return this.store.dataset.advertisers.find((a) => a.metaPageId === wanted) ?? null;
+  }
+
   async listAdvertisers(
     _ctx: SessionContext,
     options: { limit?: number; query?: string } = {},

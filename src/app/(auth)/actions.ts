@@ -5,13 +5,7 @@ import { z } from "zod";
 import { isDemoMode } from "@/lib/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { endSession, startDemoSession } from "@/server/auth";
-
-export interface AuthState {
-  error: string | null;
-  notice: string | null;
-}
-
-export const EMPTY_AUTH_STATE: AuthState = { error: null, notice: null };
+import type { AuthState } from "./auth-state";
 
 const credentialsSchema = z.object({
   email: z.string().email("Informe um e-mail válido."),

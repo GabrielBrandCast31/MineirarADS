@@ -19,8 +19,11 @@ export class InMemoryJobQueue implements JobQueue {
 
   private readonly jobs: JobRecord[] = [];
   private sequence = 0;
+  private readonly handlers: JobHandlers;
 
-  constructor(private readonly handlers: JobHandlers) {}
+  constructor(handlers: JobHandlers) {
+    this.handlers = handlers;
+  }
 
   async enqueue<N extends JobName>(
     name: N,

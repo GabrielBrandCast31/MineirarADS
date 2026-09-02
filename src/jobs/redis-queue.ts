@@ -30,10 +30,12 @@ import type {
 export class RedisJobQueue implements JobQueue {
   readonly driver = "redis" as const;
 
-  constructor(
-    private readonly redisUrl: string,
-    private readonly handlers: JobHandlers,
-  ) {
+  private readonly redisUrl: string;
+  private readonly handlers: JobHandlers;
+
+  constructor(redisUrl: string, handlers: JobHandlers) {
+    this.redisUrl = redisUrl;
+    this.handlers = handlers;
     void this.redisUrl;
     void this.handlers;
   }

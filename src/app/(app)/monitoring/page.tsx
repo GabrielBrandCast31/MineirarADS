@@ -1,13 +1,17 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Radar } from "lucide-react";
-import { MONITORING_EVENT_LABEL } from "@/core/types/monitoring";
+import { MONITORING_EVENT_LABEL, isMonitorDue } from "@/core/types/monitoring";
+import { adLibraryPageUrlFor } from "@/core/constants/meta";
+import { planHasFeature } from "@/core/constants/plans";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { MonitoringCard } from "@/components/monitoring/monitor-card";
+import { DueSweep } from "@/components/monitoring/due-sweep";
+import { WatchLinkForm } from "@/components/monitoring/watch-link-form";
 import { getRepositories } from "@/data";
 import { requireSession } from "@/server/auth";
 import { formatNumber, formatRelative } from "@/lib/format";
@@ -18,10 +22,27 @@ export default async function MonitoringPage(): Promise<React.ReactElement> {
   const session = await requireSession();
   const repositories = getRepositories();
 
-  const [monitors, events] = await Promise.all([
+  const [monitors, events, sample] = await Promise.all([
     repositories.monitoring.listMonitors(session),
     repositories.monitoring.listEvents(session, { limit: 30 }),
+    // Só no driver de demonstração faz sentido oferecer um link de exemplo:
+    // ele aponta para uma página do dataset sintético.
+    repositories.driver === "memory"
+      ? repositories.catalog.listAdvertisers(session, { limit: 12 })
+      : Promise.resolve([]),
   ]);
+
+  const now = new Date();
+  const dueCount = monitors.filter((monitor) => isMonitorDue(monitor, now)).length;
+
+  // O exemplo tem de ser uma página ainda não acompanhada, senão o clique só
+  // responde "já estava sendo acompanhada" e não demonstra nada.
+  const watchedPages = new Set(
+    monitors.filter((monitor) => monitor.target === "advertiser").map((m) => m.entityId),
+  );
+  const samplePageId =
+    sample.find((advertiser) => advertiser.metaPageId && !watchedPages.has(advertiser.id))
+      ?.metaPageId ?? null;
 
   return (
     <div className="space-y-6">
@@ -41,11 +62,18 @@ export default async function MonitoringPage(): Promise<React.ReactElement> {
         }
       />
 
+      <WatchLinkForm
+        allowHourly={planHasFeature(session.workspace.planId, "advanced_monitoring")}
+        exampleUrl={samplePageId ? adLibraryPageUrlFor(samplePageId) : null}
+      />
+
+      <DueSweep due={dueCount} />
+
       {monitors.length === 0 ? (
         <EmptyState
           icon={<Radar />}
           title="Nenhum monitoramento ativo"
-          description="Use o ícone de radar em qualquer anúncio, oferta ou página para começar a acompanhar as mudanças."
+          description="Cole o link da Biblioteca de Anúncios de um anunciante no campo acima, ou use o ícone de radar em qualquer anúncio, oferta ou página."
           action={
             <Button asChild variant="heat">
               <Link href="/mine">Minerar anúncios</Link>

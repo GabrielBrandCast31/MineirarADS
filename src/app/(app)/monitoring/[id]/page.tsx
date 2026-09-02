@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Radar } from "lucide-react";
+import { ArrowLeft, ExternalLink, Radar } from "lucide-react";
 import { MONITOR_FREQUENCY_LABEL, MONITOR_TARGET_LABEL, MONITORING_EVENT_LABEL } from "@/core/types/monitoring";
+import { adLibraryPageUrlFor } from "@/core/constants/meta";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,10 +41,19 @@ export default async function MonitorPage({ params }: PageProps): Promise<React.
   const monitor = await repositories.monitoring.getMonitor(session, id);
   if (!monitor) notFound();
 
-  const [snapshots, events] = await Promise.all([
+  const [snapshots, events, advertiser] = await Promise.all([
     repositories.monitoring.listSnapshots(session, monitor.id, 60),
     repositories.monitoring.listEvents(session, { monitorId: monitor.id, limit: 40 }),
+    monitor.target === "advertiser"
+      ? repositories.catalog.getAdvertiser(session, monitor.entityId)
+      : Promise.resolve(null),
   ]);
+
+  // A página pública da Biblioteca é a fonte deste monitoramento; deixá-la a um
+  // clique é o que permite conferir na mão o que a coleta afirma.
+  const libraryUrl = advertiser?.metaPageId
+    ? adLibraryPageUrlFor(advertiser.metaPageId, advertiser.country ?? "BR")
+    : null;
 
   const latest = snapshots.at(-1);
   const first = snapshots[0];
@@ -79,6 +89,11 @@ export default async function MonitorPage({ params }: PageProps): Promise<React.
                 ? `Verificado ${formatRelative(monitor.lastCheckedAt)}`
                 : "Nunca verificado"}
             </Badge>
+            {monitor.active && monitor.nextCheckAt ? (
+              <Badge variant="neutral" size="sm">
+                Próxima coleta {formatRelative(monitor.nextCheckAt)}
+              </Badge>
+            ) : null}
           </div>
         </div>
 
@@ -86,6 +101,14 @@ export default async function MonitorPage({ params }: PageProps): Promise<React.
           <Button asChild variant="outline" size="sm">
             <Link href={targetHref(monitor.target, monitor.entityId)}>Abrir alvo</Link>
           </Button>
+          {libraryUrl ? (
+            <Button asChild variant="outline" size="sm">
+              <a href={libraryUrl} target="_blank" rel="noreferrer noopener">
+                Biblioteca de Anúncios
+                <ExternalLink />
+              </a>
+            </Button>
+          ) : null}
           <MonitorActions monitorId={monitor.id} />
         </div>
       </header>
