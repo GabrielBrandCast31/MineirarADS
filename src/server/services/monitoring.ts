@@ -317,19 +317,48 @@ export async function sweepDueMonitors(
 /**
  * Reconsulta a fonte para o alvo monitorado.
  *
- * Só páginas têm de onde recoletar: oferta e anúncio são recortes do que já
- * está no catálogo, e ambos são atualizados quando a página deles é coletada.
+ * A Ad Library só sabe responder por página, então os três tipos de alvo
+ * convergem para o mesmo lugar: a página do anunciante. É isso que faz o
+ * acompanhamento de uma **oferta** encontrar anúncios novos — sem este passo,
+ * a comparação seria entre duas leituras do mesmo catálogo e o crescimento
+ * nunca apareceria.
  *
- * Não consome a cota de buscas — quem pediu isso foi o agendamento, não o
+ * Não consome a cota de buscas: quem pediu a coleta foi o agendamento, não o
  * usuário.
  */
 async function refreshFromSource(ctx: SessionContext, monitor: Monitor): Promise<void> {
-  if (monitor.target !== "advertiser") return;
+  const page = await sourcePageOf(ctx, monitor);
+  if (!page) return;
+  await collectPage(ctx, page.pageId, page.country);
+}
 
-  const advertiser = await getRepositories().catalog.getAdvertiser(ctx, monitor.entityId);
-  if (!advertiser?.metaPageId) return;
+/** A página da Meta por trás do alvo, seja ele anúncio, oferta ou anunciante. */
+async function sourcePageOf(
+  ctx: SessionContext,
+  monitor: Monitor,
+): Promise<{ pageId: string; country: CountryCode | null } | null> {
+  const catalog = getRepositories().catalog;
 
-  await collectPage(ctx, advertiser.metaPageId, advertiser.country);
+  const advertiserId = await (async (): Promise<string | null> => {
+    switch (monitor.target) {
+      case "advertiser":
+        return monitor.entityId;
+      case "offer": {
+        // Oferta é agrupamento nosso; quem tem página é o anunciante dela.
+        const offer = await catalog.getOffer(ctx, monitor.entityId);
+        return offer?.advertiserId ?? null;
+      }
+      case "ad": {
+        const ad = await catalog.getAd(ctx, monitor.entityId);
+        return ad?.advertiserId ?? null;
+      }
+    }
+  })();
+  if (!advertiserId) return null;
+
+  const advertiser = await catalog.getAdvertiser(ctx, advertiserId);
+  if (!advertiser?.metaPageId) return null;
+  return { pageId: advertiser.metaPageId, country: advertiser.country };
 }
 
 /**

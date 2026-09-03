@@ -22,25 +22,44 @@ import type {
 import { getMockDataset, type MockDataset } from "@/mock/dataset";
 import { Rng } from "@/mock/rng";
 import type { LogRecord } from "@/data/types";
+import { hashPassword } from "./accounts";
+import { restoreStore, startStoreAutoSave } from "./persistence";
 
 export const DEMO_USER_ID = "usr_demo";
 export const DEMO_WORKSPACE_ID = "ws_demo";
 export const DEMO_EMAIL = "demo@adminer.local";
+/** Senha da conta de demonstração — pública de propósito, é uma vitrine. */
+export const DEMO_PASSWORD = "demo1234";
 
 const DAY = 86_400_000;
 
 /**
  * Estado mutável do driver `memory`.
  *
- * Vive no processo. Sobrevive a hot reload porque é guardado em `globalThis` —
- * sem isso, cada recompilação em desenvolvimento apagaria coleções e
- * monitoramentos criados pelo usuário, o que faria a demonstração parecer
- * quebrada.
+ * Vive no processo e sobrevive a hot reload porque é guardado em `globalThis`.
+ * Entre execuções, sobrevive em disco — ver `./persistence.ts`: contas e
+ * histórico de monitoramento não podem depender de o servidor não reiniciar.
  */
+/**
+ * Credencial de uma conta local.
+ *
+ * Só o hash é guardado — o arquivo de estado (`.data/store.json`) nunca vê a
+ * senha. Ver `./accounts.ts`.
+ */
+export interface StoredCredential {
+  userId: string;
+  /** Sempre normalizado em minúsculas. */
+  email: string;
+  passwordHash: string;
+  salt: string;
+  createdAt: string;
+}
+
 export interface MemoryStore {
   dataset: MockDataset;
 
   users: AppUser[];
+  credentials: StoredCredential[];
   workspaces: Workspace[];
   members: WorkspaceMember[];
   subscriptions: Subscription[];
@@ -77,7 +96,20 @@ declare global {
 }
 
 export function getMemoryStore(): MemoryStore {
-  globalThis.__adminerMemoryStore ??= seedStore();
+  const existing = globalThis.__adminerMemoryStore;
+  if (existing) {
+    // Uma recompilação em desenvolvimento reavalia este módulo mas mantém o
+    // store da geração anterior — que pode não ter os campos adicionados
+    // depois. Completar aqui evita que um `undefined` derrube o login.
+    if (!existing.credentials) {
+      existing.credentials = [];
+      ensureDemoAccount(existing, new Date());
+    }
+    startStoreAutoSave(getMemoryStore);
+    return existing;
+  }
+
+  globalThis.__adminerMemoryStore = seedStore();
   return globalThis.__adminerMemoryStore;
 }
 
@@ -101,6 +133,7 @@ function seedStore(): MemoryStore {
 
   const store: MemoryStore = {
     dataset,
+    credentials: [],
     users: [
       {
         id: DEMO_USER_ID,
@@ -166,12 +199,72 @@ function seedStore(): MemoryStore {
 
   globalThis.__adminerMemoryStore = store;
 
-  seedCollections(store, dataset, rng, now);
-  seedMonitors(store, dataset, rng, now);
-  seedUsage(store, now);
-  seedSearches(store, now);
+  // Estado gravado tem prioridade sobre a semente: relançar o servidor não
+  // pode ressuscitar dados de demonstração por cima do que o usuário fez.
+  if (!restoreStore(store)) {
+    seedCollections(store, dataset, rng, now);
+    seedMonitors(store, dataset, rng, now);
+    seedUsage(store, now);
+    seedSearches(store, now);
+  }
+
+  ensureDemoAccount(store, now);
+  // Só agenda a gravação: semear não é uma mudança do usuário, e um processo de
+  // build (que também instancia o store) não deve escrever por cima do estado
+  // de quem está com a aplicação no ar.
+  startStoreAutoSave(getMemoryStore);
 
   return store;
+}
+
+/**
+ * Garante que a conta de demonstração exista e saiba entrar.
+ *
+ * Roda tanto na primeira execução quanto sobre um estado restaurado: a conta de
+ * demonstração é parte do produto (é ela que abre o workspace com dados
+ * sintéticos), então não pode depender de o arquivo de estado tê-la guardado.
+ */
+function ensureDemoAccount(store: MemoryStore, now: Date): void {
+  const createdAt = new Date(now.getTime() - 40 * DAY).toISOString();
+
+  if (!store.users.some((user) => user.id === DEMO_USER_ID)) {
+    store.users.push({
+      id: DEMO_USER_ID,
+      email: DEMO_EMAIL,
+      name: "Conta de demonstração",
+      avatarUrl: null,
+      createdAt,
+    });
+  }
+  if (!store.workspaces.some((workspace) => workspace.id === DEMO_WORKSPACE_ID)) {
+    store.workspaces.push({
+      id: DEMO_WORKSPACE_ID,
+      name: "Workspace de demonstração",
+      slug: "demo",
+      planId: "agency",
+      ownerId: DEMO_USER_ID,
+      createdAt,
+    });
+  }
+  if (!store.members.some((member) => member.userId === DEMO_USER_ID)) {
+    store.members.push({
+      workspaceId: DEMO_WORKSPACE_ID,
+      userId: DEMO_USER_ID,
+      role: "owner",
+      email: DEMO_EMAIL,
+      name: "Conta de demonstração",
+      avatarUrl: null,
+      createdAt,
+    });
+  }
+  if (!store.credentials.some((credential) => credential.email === DEMO_EMAIL)) {
+    store.credentials.push({
+      userId: DEMO_USER_ID,
+      email: DEMO_EMAIL,
+      ...hashPassword(DEMO_PASSWORD),
+      createdAt,
+    });
+  }
 }
 
 const SEED_COLLECTIONS: Array<{ name: string; description: string; color: string }> = [

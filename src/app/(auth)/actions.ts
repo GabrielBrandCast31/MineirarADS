@@ -4,7 +4,12 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { isDemoMode } from "@/lib/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { endSession, startDemoSession } from "@/server/auth";
+import {
+  authenticateLocal,
+  endSession,
+  registerLocalAccount,
+  startLocalSession,
+} from "@/server/auth";
 import type { AuthState } from "./auth-state";
 
 const credentialsSchema = z.object({
@@ -34,10 +39,10 @@ function safeDestination(raw: FormDataEntryValue | null): string {
 /**
  * Entrar.
  *
- * Sem Supabase configurado, a aplicação roda em modo demonstração: o
- * formulário continua existindo (e validando), mas a sessão é um cookie
- * apontando para o workspace mockado. Isso mantém o fluxo de produto igual
- * nos dois modos.
+ * Sem Supabase configurado, a aplicação roda em modo local: as contas ficam em
+ * memória (e em disco), com senha conferida por hash. A conta de demonstração
+ * é uma delas — `demo@adminer.local` / `demo1234` — e abre o workspace com
+ * dados sintéticos. O fluxo de produto é idêntico nos dois modos.
  */
 export async function signInAction(
   _prev: AuthState,
@@ -54,7 +59,11 @@ export async function signInAction(
   const destination = safeDestination(formData.get("next"));
 
   if (isDemoMode()) {
-    await startDemoSession();
+    const outcome = await authenticateLocal(parsed.data.email, parsed.data.password);
+    if (!outcome.ok || !outcome.userId) {
+      return { error: outcome.error ?? "Não foi possível entrar.", notice: null };
+    }
+    await startLocalSession(outcome.userId);
     redirect(destination);
   }
 
@@ -85,7 +94,17 @@ export async function signUpAction(
   const destination = safeDestination(formData.get("next"));
 
   if (isDemoMode()) {
-    await startDemoSession(parsed.data.name);
+    // Conta local nasce com workspace próprio e vazio — nada da demonstração
+    // atravessa para ela.
+    const outcome = await registerLocalAccount({
+      email: parsed.data.email,
+      password: parsed.data.password,
+      name: parsed.data.name ?? null,
+    });
+    if (!outcome.ok || !outcome.userId) {
+      return { error: outcome.error ?? "Não foi possível criar a conta.", notice: null };
+    }
+    await startLocalSession(outcome.userId);
     redirect(destination);
   }
 

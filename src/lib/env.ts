@@ -38,6 +38,15 @@ const serverSchema = z.object({
   OPENAI_API_KEY: optionalString,
   OPENAI_MODEL: z.string().default("gpt-4.1-mini"),
 
+  /**
+   * Onde o driver `memory` guarda o estado entre execuções.
+   *
+   * Sem isto, contas, monitoramentos e snapshots morreriam a cada reinício —
+   * o que inviabiliza acompanhar uma oferta por uma semana. Caminho relativo
+   * é resolvido a partir do diretório de execução.
+   */
+  MEMORY_STORE_FILE: z.string().default(".data/store.json"),
+
   REDIS_URL: optionalString,
   RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(120),

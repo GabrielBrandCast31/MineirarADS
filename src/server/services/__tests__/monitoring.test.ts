@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, test } from "node:test";
+import { disableStorePersistence } from "@/data/memory/persistence";
+// Antes de qualquer acesso ao store: um teste não pode gravar por cima do
+// estado real de quem está desenvolvendo.
+disableStorePersistence();
+
+import type { Ad } from "@/core/types/ad";
+import type { SearchAdsParams } from "@/core/types/search";
 import type { SessionContext } from "@/core/types/workspace";
 import { MONITOR_FREQUENCY_HOURS } from "@/core/types/monitoring";
 import { InvalidAdLibraryLinkError } from "@/core/meta/ad-library-link";
 import { adLibraryPageUrlFor } from "@/core/constants/meta";
 import { getRepositories } from "@/data";
 import { DEMO_USER_ID, getMemoryStore, resetMemoryStore } from "@/data/memory/store";
+import type { AdProvider, AdSearchResult } from "@/providers/ads";
 import { MockAdProvider, setAdProvider } from "@/providers/ads";
-import { sweepDueMonitors, watchAdLibraryLink } from "../monitoring";
+import { startMonitoring, sweepDueMonitors, watchAdLibraryLink } from "../monitoring";
 
 /**
  * Fluxo "salvei o link e quero acompanhar a semana".
@@ -43,6 +51,7 @@ function samplePage(): { pageId: string; url: string; advertiserId: string } {
 
 beforeEach(() => {
   resetMemoryStore();
+  setAdProvider(new MockAdProvider({ latencyMs: 0 }));
 });
 
 test("link de página vira monitoramento com o primeiro snapshot", async () => {
@@ -178,5 +187,74 @@ test("link que não é de uma página é recusado com instrução", async () => 
     (await getRepositories().monitoring.listMonitors(ctx)).length,
     before,
     "link recusado não pode deixar alvo criado",
+  );
+});
+
+/**
+ * Provider que devolve um anúncio a mais a cada coleta.
+ *
+ * É o que uma página real faz quando o anunciante sobe criativo novo — e o
+ * único jeito de provar que a verificação **reconsulta a fonte** em vez de
+ * reler o próprio catálogo.
+ */
+function growingProvider(base: Ad, extra: number): AdProvider {
+  const mock = new MockAdProvider({ latencyMs: 0 });
+  const clones = Array.from({ length: extra }, (_, index) => ({
+    ...base,
+    id: `${base.id}_fonte_${index}`,
+    metaAdArchiveId: `${base.metaAdArchiveId}${index}`,
+  }));
+
+  return Object.assign(Object.create(Object.getPrototypeOf(mock) as object) as AdProvider, mock, {
+    async searchAds(params: SearchAdsParams): Promise<AdSearchResult> {
+      const original = await mock.searchAds(params);
+      return { ...original, items: [...original.items, ...clones] };
+    },
+  });
+}
+
+test("oferta monitorada enxerga o que a fonte passou a veicular", async () => {
+  const ctx = demoSession();
+  const repositories = getRepositories();
+  const store = getMemoryStore();
+
+  const offer = store.dataset.offers.find(
+    (candidate) => (store.dataset.index.adsByOfferId.get(candidate.id)?.length ?? 0) > 0,
+  );
+  assert.ok(offer, "dataset precisa de uma oferta com anúncios");
+  const baseAd = store.dataset.index.adsByOfferId.get(offer.id)?.[0];
+  assert.ok(baseAd);
+
+  const monitor = await startMonitoring(ctx, {
+    target: "offer",
+    entityId: offer.id,
+    label: offer.name,
+    frequency: "weekly",
+  });
+  const first = await repositories.monitoring.listSnapshots(ctx, monitor.id);
+  assert.equal(first.length, 1);
+
+  // A fonte passa a devolver dois anúncios novos da mesma oferta, e o relógio
+  // do monitoramento vence.
+  setAdProvider(growingProvider(baseAd, 2));
+  const stored = store.monitors.find((candidate) => candidate.id === monitor.id);
+  assert.ok(stored);
+  stored.nextCheckAt = new Date(Date.now() - 60_000).toISOString();
+
+  const sweep = await sweepDueMonitors(ctx);
+  assert.deepEqual({ due: sweep.due, checked: sweep.checked }, { due: 1, checked: 1 });
+
+  const timeline = await repositories.monitoring.listSnapshots(ctx, monitor.id);
+  assert.equal(timeline.length, 2);
+  assert.equal(
+    timeline[1]!.adCount - timeline[0]!.adCount,
+    2,
+    "os anúncios novos da fonte precisam entrar na contagem da oferta",
+  );
+
+  const events = await repositories.monitoring.listEvents(ctx, { monitorId: monitor.id });
+  assert.ok(
+    events.some((event) => event.type === "new_ad" || event.type === "volume_increase"),
+    `tipos: ${events.map((event) => event.type).join(", ")}`,
   );
 });

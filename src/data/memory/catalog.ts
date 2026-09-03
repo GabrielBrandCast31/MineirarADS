@@ -186,15 +186,18 @@ export class MemoryCatalogRepository implements CatalogRepository {
       if (!store.dataset.index.offerById.has(offer.id)) {
         store.dataset.offers.push(offer);
         store.dataset.index.offerById.set(offer.id, offer);
+        push(store.dataset.index.offersByAdvertiserId, offer.advertiserId, offer);
       }
     }
     for (const ad of payload.ads ?? []) {
       if (store.dataset.index.adById.has(ad.id)) continue;
       store.dataset.ads.push(ad);
       store.dataset.index.adById.set(ad.id, ad);
-      const byAdvertiser = store.dataset.index.adsByAdvertiserId.get(ad.advertiserId) ?? [];
-      byAdvertiser.push(ad);
-      store.dataset.index.adsByAdvertiserId.set(ad.advertiserId, byAdvertiser);
+      push(store.dataset.index.adsByAdvertiserId, ad.advertiserId, ad);
+      // Sem este índice, um anúncio coletado nunca entrava na oferta dele — e
+      // acompanhar o crescimento de uma oferta ficava impossível: a contagem
+      // só via o que o dataset já trazia.
+      if (ad.offerId) push(store.dataset.index.adsByOfferId, ad.offerId, ad);
       ads += 1;
     }
 
@@ -266,6 +269,13 @@ export class MemoryCatalogRepository implements CatalogRepository {
 }
 
 /* ------------------------------------------------------------- utilitários -- */
+
+/** Acrescenta a uma lista indexada, criando-a na primeira vez. */
+function push<T>(index: Map<string, T[]>, key: string, value: T): void {
+  const current = index.get(key);
+  if (current) current.push(value);
+  else index.set(key, [value]);
+}
 
 function filterByQuery(store: MemoryStore, ads: Ad[], query: string): Ad[] {
   const terms = normalize(query).split(" ").filter((t) => t.length >= 3);

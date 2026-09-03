@@ -17,3 +17,6 @@ coverage
 supabase/.temp
 
 .env 
+
+# Estado do driver em memória (contas e histórico locais)
+.data

@@ -28,9 +28,14 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   const isApi = pathname.startsWith("/api/");
 
   if (!isSupabaseConfigured()) {
-    // Modo demonstração: não há token para renovar, apenas um cookie próprio.
-    const hasDemoSession = request.cookies.has(DEMO_SESSION_COOKIE);
-    return guard({ request, authenticated: hasDemoSession, isApi }) ?? NextResponse.next();
+    // Modo local: não há token para renovar, apenas um cookie próprio. E aqui
+    // na borda só se sabe que ele **existe** — não a quem ele pertence, porque
+    // resolver isso exigiria carregar o store inteiro no proxy.
+    const hasLocalSession = request.cookies.has(DEMO_SESSION_COOKIE);
+    return (
+      guard({ request, authenticated: hasLocalSession, isApi, sessionVerified: false }) ??
+      NextResponse.next()
+    );
   }
 
   // `response` é reatribuído dentro de `setAll` para carregar os cookies
@@ -64,7 +69,13 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const redirectResponse = guard({ request, authenticated: Boolean(user), isApi });
+  // `getUser()` valida o JWT, então aqui a resposta é confiável.
+  const redirectResponse = guard({
+    request,
+    authenticated: Boolean(user),
+    isApi,
+    sessionVerified: true,
+  });
   if (!redirectResponse) return response;
 
   // Os cookies renovados precisam sobreviver ao redirecionamento, senão o
@@ -82,10 +93,16 @@ function guard({
   request,
   authenticated,
   isApi,
+  sessionVerified,
 }: {
   request: NextRequest;
   authenticated: boolean;
   isApi: boolean;
+  /**
+   * Se `authenticated` significa "esta sessão existe de verdade" ou apenas
+   * "há um cookie". Ver o desvio de rota pública abaixo.
+   */
+  sessionVerified: boolean;
 }): NextResponse | null {
   if (isApi) return null;
 
@@ -101,7 +118,15 @@ function guard({
     return NextResponse.redirect(url);
   }
 
-  if (authenticated && isPublic) {
+  // Só desvia de /login com uma sessão comprovada. Com o cookie apenas
+  // presente, isto criava um laço infinito: o proxy mandava para /dashboard
+  // pela presença do cookie, `(app)/layout.tsx` não achava o usuário e mandava
+  // de volta para /login. Acontece sempre que o cookie sobrevive ao usuário —
+  // conta removida, `.data` apagado, `MEMORY_STORE_FILE` trocado — e prendia a
+  // pessoa fora da aplicação, sem nem conseguir ver o formulário de login.
+  // Quando não há certeza, `(auth)/layout.tsx` faz o desvio: ele resolve a
+  // sessão de fato.
+  if (authenticated && isPublic && sessionVerified) {
     const url = request.nextUrl.clone();
     url.pathname = "/dashboard";
     url.search = "";

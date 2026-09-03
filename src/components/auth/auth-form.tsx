@@ -35,7 +35,6 @@ export function AuthForm({
             name="name"
             autoComplete="name"
             placeholder="Como devemos te chamar"
-            defaultValue={demo ? "Gestor de tráfego" : undefined}
           />
         </div>
       ) : null}
@@ -49,7 +48,6 @@ export function AuthForm({
           required
           autoComplete="email"
           placeholder="voce@agencia.com.br"
-          defaultValue={demo ? "demo@adminer.local" : undefined}
         />
       </div>
 
@@ -68,7 +66,6 @@ export function AuthForm({
           minLength={8}
           autoComplete={mode === "signin" ? "current-password" : "new-password"}
           placeholder="••••••••"
-          defaultValue={demo ? "demo1234" : undefined}
         />
       </div>
 
@@ -99,9 +96,23 @@ export function AuthForm({
         <p className="flex items-start gap-2 rounded-md border border-line bg-surface/60 px-3 py-2.5 text-[12px] leading-relaxed text-ink-faint">
           <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-info" />
           <span>
-            <strong className="font-medium text-ink-muted">Modo demonstração.</strong> O Supabase
-            não está configurado, então qualquer credencial válida abre o workspace de exemplo com
-            dados sintéticos. Configure as chaves para ativar contas reais.
+            <strong className="font-medium text-ink-muted">Modo local.</strong>{" "}
+            {mode === "signin" ? (
+              <>
+                O Supabase não está configurado: as contas e o histórico ficam neste computador.
+                Para ver a plataforma com dados sintéticos, entre na demonstração —{" "}
+                <code className="rounded bg-surface-3 px-1 py-0.5 text-[11px]">
+                  demo@adminer.local
+                </code>{" "}
+                / <code className="rounded bg-surface-3 px-1 py-0.5 text-[11px]">demo1234</code>.
+              </>
+            ) : (
+              <>
+                Sua conta é criada neste computador, com workspace próprio e vazio — nada da
+                demonstração atravessa para ele. O catálogo de anúncios continua sendo o dataset
+                sintético até você configurar o token da Ad Library.
+              </>
+            )}
           </span>
         </p>
       ) : null}

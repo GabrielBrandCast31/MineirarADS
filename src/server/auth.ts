@@ -4,19 +4,20 @@ import type { SessionContext, WorkspaceRole } from "@/core/types/workspace";
 import { adminEmails, isDemoMode } from "@/lib/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { DEMO_SESSION_COOKIE, WORKSPACE_COOKIE } from "@/lib/session-cookies";
+import { DEMO_USER_ID, getMemoryStore } from "@/data/memory/store";
 import {
-  DEMO_EMAIL,
-  DEMO_USER_ID,
-  DEMO_WORKSPACE_ID,
-  getMemoryStore,
-} from "@/data/memory/store";
+  createLocalAccount,
+  findCredentialByEmail,
+  verifyPassword,
+} from "@/data/memory/accounts";
 
 /**
  * Resolve a sessão atual.
  *
  * Dois modos, mesma saída:
  *  - **Supabase configurado**: sessão real via Supabase Auth + RLS.
- *  - **Modo demonstração**: cookie próprio apontando para o workspace mockado.
+ *  - **Modo local** (sem Supabase): contas guardadas em memória e em disco,
+ *    com cookie próprio apontando para o usuário — a de demonstração inclusa.
  *
  * Todo o resto da aplicação recebe apenas `SessionContext` e não sabe qual
  * modo está ativo. Isso é o que permite construir e validar o produto inteiro
@@ -37,42 +38,107 @@ export async function getApiSession(): Promise<SessionContext | null> {
   return getSession();
 }
 
-/* -------------------------------------------------------------- demo ----- */
+/* ------------------------------------------------------------- local ----- */
 
+/**
+ * Sessão local (sem Supabase).
+ *
+ * O cookie guarda o `id` do usuário, e não um simples "1": é o que permite
+ * mais de uma conta no mesmo modo — a de demonstração, com dados sintéticos, e
+ * as contas reais criadas pelo cadastro, cada uma no seu workspace. O valor
+ * legado `"1"` continua valendo como "conta de demonstração", para não invalidar
+ * sessões (e scripts) já existentes.
+ */
 async function getDemoSession(): Promise<SessionContext | null> {
   const store = getMemoryStore();
   const jar = await cookies();
-  if (!jar.get(DEMO_SESSION_COOKIE)) return null;
 
-  const workspaceId = jar.get(WORKSPACE_COOKIE)?.value ?? DEMO_WORKSPACE_ID;
-  const workspace =
-    store.workspaces.find((w) => w.id === workspaceId) ?? store.workspaces[0];
-  const user = store.users.find((u) => u.id === DEMO_USER_ID) ?? store.users[0];
-  if (!workspace || !user) return null;
+  const cookieValue = jar.get(DEMO_SESSION_COOKIE)?.value;
+  if (!cookieValue) return null;
+
+  const userId = cookieValue === "1" ? DEMO_USER_ID : cookieValue;
+  const user = store.users.find((candidate) => candidate.id === userId);
+  if (!user) return null;
+
+  const memberships = store.members.filter((member) => member.userId === user.id);
+  const preferred = jar.get(WORKSPACE_COOKIE)?.value;
+  const membership =
+    memberships.find((member) => member.workspaceId === preferred) ?? memberships[0];
+  const workspace = store.workspaces.find(
+    (candidate) => candidate.id === membership?.workspaceId,
+  );
+  if (!membership || !workspace) return null;
 
   return {
     user,
     workspace,
-    role: "owner",
+    role: membership.role,
     demo: true,
+    // Instalação local é de um dono só; o painel administrativo continua
+    // acessível como sempre foi neste modo.
     isPlatformAdmin: true,
   };
 }
 
-/** Cria a sessão de demonstração (usada pelo formulário de login sem Supabase). */
-export async function startDemoSession(name?: string): Promise<void> {
-  const store = getMemoryStore();
-  if (name?.trim()) {
-    const user = store.users.find((u) => u.id === DEMO_USER_ID);
-    if (user) user.name = name.trim();
+export interface LocalAuthOutcome {
+  ok: boolean;
+  userId?: string;
+  error?: string;
+}
+
+/**
+ * Confere e-mail e senha das contas locais.
+ *
+ * Antes, qualquer credencial abria o workspace de demonstração. Isso ficou
+ * ruim assim que passou a existir uma conta de verdade: um e-mail digitado
+ * errado levava, sem avisar, para os dados sintéticos de outra conta.
+ */
+export async function authenticateLocal(
+  email: string,
+  password: string,
+): Promise<LocalAuthOutcome> {
+  // Garante que a conta de demonstração já esteja semeada.
+  getMemoryStore();
+
+  const credential = findCredentialByEmail(email);
+  if (!credential) {
+    return {
+      ok: false,
+      error: "Não encontramos uma conta com esse e-mail. Crie sua conta para começar.",
+    };
   }
+  if (!verifyPassword(credential, password)) {
+    return { ok: false, error: "E-mail ou senha incorretos." };
+  }
+  return { ok: true, userId: credential.userId };
+}
+
+/** Cadastro no modo local: conta nova, workspace próprio e vazio. */
+export async function registerLocalAccount(input: {
+  email: string;
+  password: string;
+  name?: string | null;
+}): Promise<LocalAuthOutcome> {
+  getMemoryStore();
+
+  if (findCredentialByEmail(input.email)) {
+    return { ok: false, error: "Já existe uma conta com esse e-mail. Faça login." };
+  }
+  const { user } = createLocalAccount(input);
+  return { ok: true, userId: user.id };
+}
+
+/** Abre a sessão local para um usuário conhecido. */
+export async function startLocalSession(userId: string): Promise<void> {
   const jar = await cookies();
-  jar.set(DEMO_SESSION_COOKIE, "1", {
+  jar.set(DEMO_SESSION_COOKIE, userId, {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 24 * 30,
   });
+  // Sessão nova não deve herdar o workspace ativo da sessão anterior.
+  jar.delete(WORKSPACE_COOKIE);
 }
 
 export async function endSession(): Promise<void> {
@@ -84,8 +150,6 @@ export async function endSession(): Promise<void> {
     await supabase.auth.signOut();
   }
 }
-
-export const DEMO_CREDENTIALS = { email: DEMO_EMAIL, password: "demo1234" };
 
 /* ------------------------------------------------------------ supabase --- */
 
